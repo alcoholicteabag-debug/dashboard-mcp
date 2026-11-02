@@ -1,0 +1,12 @@
+# Railway Deployment Config
+
+[build]
+builder = "nixpacks"
+buildCommand = "npm run build"
+
+[start]
+cmd = "npm start"
+
+[env]
+NODE_ENV = "production"
+PORT = "8080"
