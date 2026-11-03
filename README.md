@@ -194,3 +194,4 @@ registerAppTool(server, "your_tool", {
 **Status**: 🚀 Ready to deploy
 
 Built with: TypeScript, Express, Supabase, Railway, Cloudflare, MCP SDK
+# dashboard-mcp

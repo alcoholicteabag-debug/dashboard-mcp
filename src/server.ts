@@ -3,6 +3,8 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import * as readline from "readline";
+import express from "express";
+import cors from "cors";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, "../.env.local") });
@@ -263,6 +265,118 @@ async function handleRequest(request: Record<string, unknown>) {
         };
       }
 
+      if (name === "export_digest") {
+        const userId = (arg.userId as string) || "default";
+
+        const { data: state } = await supabase
+          .from("dashboard_state")
+          .select("data")
+          .eq("user_id", userId)
+          .single();
+
+        const data = state?.data || {};
+        const habits = (data.habits as Record<string, unknown>[]) || [];
+        const tasks = (data.tasks as Record<string, unknown>[]) || [];
+
+        const habitDone = habits.filter((h) => h.status === "done").length;
+        const habitRate = habits.length
+          ? Math.round((habitDone / habits.length) * 100)
+          : 0;
+        const tasksDone = tasks.filter((t) => t.status === "done").length;
+
+        const digest = {
+          date: new Date().toISOString().split("T")[0],
+          summary: `${habitRate}% habits done, ${tasksDone}/${tasks.length} tasks completed`,
+          habitCompletionRate: habitRate,
+          habitsCompleted: habitDone,
+          habitsTotal: habits.length,
+          tasksCompleted: tasksDone,
+          tasksTotal: tasks.length,
+          doneHabits: habits
+            .filter((h) => h.status === "done")
+            .map((h) => (h as Record<string, unknown>).name),
+          pendingHabits: habits
+            .filter((h) => h.status === "pending")
+            .map((h) => (h as Record<string, unknown>).name),
+          completedTasks: tasks
+            .filter((t) => (t as Record<string, unknown>).status === "done")
+            .map((t) => (t as Record<string, unknown>).name),
+        };
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(digest),
+            },
+          ],
+        };
+      }
+
+      if (name === "get_goals") {
+        const userId = (arg.userId as string) || "default";
+
+        const { data: state } = await supabase
+          .from("dashboard_state")
+          .select("data")
+          .eq("user_id", userId)
+          .single();
+
+        const data = state?.data || {};
+        const goals = (data.goals as Record<string, unknown>[]) || [];
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ goals, count: goals.length }),
+            },
+          ],
+        };
+      }
+
+      if (name === "take_screenshot") {
+        const userId = (arg.userId as string) || "default";
+
+        const { data: state } = await supabase
+          .from("dashboard_state")
+          .select("data")
+          .eq("user_id", userId)
+          .single();
+
+        const data = state?.data || {};
+        const screenshotData = {
+          timestamp: new Date().toISOString(),
+          userId,
+          metrics: {
+            habitRate:
+              (data as Record<string, unknown>).habitCompletionRate || 0,
+            level: (data as Record<string, unknown>).level || 1,
+          },
+          habitsCount:
+            (
+              (data as Record<string, unknown>).habits as
+                | Record<string, unknown>[]
+                | undefined
+            )?.length || 0,
+          tasksCount:
+            (
+              (data as Record<string, unknown>).tasks as
+                | Record<string, unknown>[]
+                | undefined
+            )?.length || 0,
+        };
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(screenshotData),
+            },
+          ],
+        };
+      }
+
       return {
         content: [{ type: "text", text: `Unknown tool: ${name}` }],
       };
@@ -294,3 +408,160 @@ rl.on("line", async (line) => {
 });
 
 console.error("Dashboard MCP server running on stdio");
+
+// ========== EXPRESS REST API FOR MOBILE ==========
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+app.use(cors());
+app.use(express.json());
+
+// GET dashboard state
+app.get("/api/dashboard/:userId", async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const { data: state, error } = await supabase
+      .from("dashboard_state")
+      .select("*")
+      .eq("user_id", userId)
+      .single();
+
+    if (error) return res.status(404).json({ error: "Not found" });
+    return res.json(state.data || {});
+  } catch (e) {
+    return res.status(500).json({ error: String(e) });
+  }
+});
+
+// POST add habit
+app.post("/api/dashboard/:userId/habit", async (req, res) => {
+  const { userId } = req.params;
+  const { name } = req.body;
+
+  if (!name) return res.status(400).json({ error: "name required" });
+
+  try {
+    const { data: state } = await supabase
+      .from("dashboard_state")
+      .select("data")
+      .eq("user_id", userId)
+      .single();
+
+    const currentData = state?.data || { habits: [], tasks: [], goals: [] };
+    const newHabit = {
+      id: Date.now(),
+      name,
+      status: "pending",
+      streak: 0,
+      createdAt: new Date().toISOString(),
+    };
+
+    currentData.habits = [...(currentData.habits || []), newHabit];
+
+    await supabase
+      .from("dashboard_state")
+      .upsert({ user_id: userId, data: currentData });
+
+    return res.json({ success: true, habit: newHabit });
+  } catch (e) {
+    return res.status(500).json({ error: String(e) });
+  }
+});
+
+// POST toggle habit
+app.post("/api/dashboard/:userId/habit/:habitId/toggle", async (req, res) => {
+  const { userId, habitId } = req.params;
+
+  try {
+    const { data: state } = await supabase
+      .from("dashboard_state")
+      .select("data")
+      .eq("user_id", userId)
+      .single();
+
+    const currentData = state?.data || {};
+    const habit = (currentData.habits || []).find(
+      (h: Record<string, unknown>) => h.id === Number(habitId)
+    );
+
+    if (!habit) return res.status(404).json({ error: "Habit not found" });
+
+    habit.status = habit.status === "done" ? "pending" : "done";
+
+    await supabase
+      .from("dashboard_state")
+      .upsert({ user_id: userId, data: currentData });
+
+    return res.json({ success: true, habit });
+  } catch (e) {
+    return res.status(500).json({ error: String(e) });
+  }
+});
+
+// GET digest (daily summary)
+app.get("/api/dashboard/:userId/digest", async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    const { data: state } = await supabase
+      .from("dashboard_state")
+      .select("data")
+      .eq("user_id", userId)
+      .single();
+
+    const data = state?.data || {};
+    const habits = (data.habits as Record<string, unknown>[]) || [];
+    const tasks = (data.tasks as Record<string, unknown>[]) || [];
+
+    const habitDone = habits.filter((h) => h.status === "done").length;
+    const habitRate = habits.length
+      ? Math.round((habitDone / habits.length) * 100)
+      : 0;
+    const tasksDone = tasks.filter((t) => t.status === "done").length;
+
+    const digest = {
+      date: new Date().toISOString().split("T")[0],
+      habitCompletionRate: habitRate,
+      habitsCompleted: habitDone,
+      habitsTotal: habits.length,
+      tasksCompleted: tasksDone,
+      tasksTotal: tasks.length,
+      summary: `${habitRate}% habits done, ${tasksDone}/${tasks.length} tasks`,
+    };
+
+    return res.json(digest);
+  } catch (e) {
+    return res.status(500).json({ error: String(e) });
+  }
+});
+
+// GET goals
+app.get("/api/dashboard/:userId/goals", async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    const { data: state } = await supabase
+      .from("dashboard_state")
+      .select("data")
+      .eq("user_id", userId)
+      .single();
+
+    const data = state?.data || {};
+    const goals = (data.goals as Record<string, unknown>[]) || [];
+
+    return res.json({ goals });
+  } catch (e) {
+    return res.status(500).json({ error: String(e) });
+  }
+});
+
+// Health check
+app.get("/health", (_req, res) => {
+  return res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
+app.listen(PORT, () => {
+  console.error(`REST API running on port ${PORT}`);
+  console.error(`Health check: http://localhost:${PORT}/health`);
+});
